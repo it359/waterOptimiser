@@ -1,4 +1,4 @@
-export const API     = "http://localhost:4000";
+export const API = "https://wateroptimiser-3.onrender.com";
 export const MIN_VAL = 50000;
 export const MAX_VAL = 600000;
 export const SAVE_MIN = 0;
