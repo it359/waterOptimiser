@@ -8,22 +8,15 @@ app.use(cors());
 app.use(express.json());
 
 const LABELS = ['N1', 'N2', 'N3', 'P2', 'A2'];
-
-// ── Load ONE sheet at a time (lazy) ────────────────────────────────────────
-const cache = {};
+const cache  = {};
 
 function getSheet(label) {
   if (cache[label]) return cache[label];
   const filePath = path.join(__dirname, `data_${label}.json`);
-  if (!fs.existsSync(filePath)) {
-    console.warn(`⚠️  data_${label}.json missing!`);
-    return [];
-  }
+  if (!fs.existsSync(filePath)) { console.warn(`⚠️  data_${label}.json missing!`); return []; }
   console.log(`📂 Loading ${label}...`);
   cache[label] = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   console.log(`   ✅ ${label}: ${cache[label].length} rows`);
-
-  // Keep max 2 sheets in memory
   const keys = Object.keys(cache);
   if (keys.length > 2) {
     const evict = keys.find(k => k !== label);
@@ -32,26 +25,18 @@ function getSheet(label) {
   return cache[label];
 }
 
-// Startup — just check files exist
 console.log('\n🚀 Water Optimiser Backend starting...');
 const missing = LABELS.filter(l => !fs.existsSync(path.join(__dirname, `data_${l}.json`)));
-if (missing.length) {
-  console.error(`❌ Missing JSON files: ${missing.join(', ')}`);
-  console.error('   Run locally: node convert_local.js');
-} else {
-  console.log('✅ All JSON files found — ready!\n');
-}
+if (missing.length) console.error(`❌ Missing: ${missing.join(', ')}`);
+else console.log('✅ All JSON files found — ready!\n');
 
 // ── Routes ─────────────────────────────────────────────────────────────────
+
+// Frontend expects { N1: [...], N2: [...], ... }
 app.get('/api/data', (req, res) => {
-  const counts = Object.fromEntries(LABELS.map(l => {
-    try {
-      const p = path.join(__dirname, `data_${l}.json`);
-      const d = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p,'utf8')) : [];
-      return [l, d.length];
-    } catch { return [l, 0]; }
-  }));
-  res.json(counts);
+  const result = {};
+  for (const label of LABELS) result[label] = getSheet(label);
+  res.json(result);
 });
 
 app.get('/api/data/:nap', (req, res) => {
@@ -73,12 +58,7 @@ app.get('/api/data/:nap/:index', (req, res) => {
 });
 
 app.get('/api/files', (req, res) => {
-  const counts = Object.fromEntries(LABELS.map(l => {
-    const p = path.join(__dirname, `data_${l}.json`);
-    if (!fs.existsSync(p)) return [l, 0];
-    const d = JSON.parse(fs.readFileSync(p,'utf8'));
-    return [l, d.length];
-  }));
+  const counts = Object.fromEntries(LABELS.map(l => [l, cache[l]?.length || 0]));
   res.json({ source: 'JSON', ...counts });
 });
 
