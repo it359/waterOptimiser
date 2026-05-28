@@ -8,20 +8,30 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── Synthetic datetime config ──────────────────────────────────────────────
+// ── Config ─────────────────────────────────────────────────────────────────
 const START_MS = new Date('2022-01-01T00:00:00').getTime();
 const STEP_MS  = 30 * 60 * 1000;
+const LABELS   = ['N1', 'N2', 'N3', 'P2', 'A2'];
 
+// ── Helpers ────────────────────────────────────────────────────────────────
 function makeDatetime(rowIndex) {
   const dt  = new Date(START_MS + rowIndex * STEP_MS);
   const pad = n => String(n).padStart(2, '0');
-  return `${dt.getFullYear()}${pad(dt.getMonth() + 1)}${pad(dt.getDate())}-${pad(dt.getHours())}${pad(dt.getMinutes())}00`;
+  return `${dt.getFullYear()}${pad(dt.getMonth()+1)}${pad(dt.getDate())}-${pad(dt.getHours())}${pad(dt.getMinutes())}00`;
+}
+
+function parsePair(val) {
+  if (!val) return { pv: null, ov: null };
+  if (Array.isArray(val)) return { pv: val[0], ov: val[1] };
+  try {
+    const arr = JSON.parse(String(val).replace(/'/g, '"'));
+    return { pv: arr[0] ?? null, ov: arr[1] ?? null };
+  } catch { return { pv: null, ov: null }; }
 }
 
 function parseSheet(wb, sheetName, globalOffset) {
   const ws = wb.Sheets[sheetName];
   if (!ws) return [];
-
   const raw = XLSX.utils.sheet_to_json(ws, { defval: null });
 
   let lastReal = raw.length - 1;
@@ -33,34 +43,20 @@ function parseSheet(wb, sheetName, globalOffset) {
   ) { lastReal--; }
 
   const trimmed = raw.slice(0, lastReal + 1);
-  console.log(`     ${sheetName}: ${raw.length} total → ${trimmed.length} rows (rows 2 to ${trimmed.length + 1})`);
+  console.log(`     ${sheetName}: ${trimmed.length} rows`);
 
-  return trimmed.map((row, localIndex) => {
+  return trimmed.map((row, i) => {
     const curr = Number(row['currentOperatingCost']) || 0;
     const newC = Number(row['newOperatingCost'])     || 0;
-
-    const parsePair = (val) => {
-      if (!val) return { pv: null, ov: null };
-      if (Array.isArray(val)) return { pv: val[0], ov: val[1] };
-      try {
-        const arr = JSON.parse(String(val).replace(/'/g, '"'));
-        return { pv: arr[0] ?? null, ov: arr[1] ?? null };
-      } catch { return { pv: null, ov: null }; }
-    };
-
     const bore = parsePair(row['Bore']);
     const cwro = parsePair(row['CWRO']);
     const bbd  = parsePair(row['BoilerBD'] ?? row['BoilrBD']);
     const bd   = parsePair(row['BD']);
-
-    const muFlowPV = (bore.pv || 0) + (cwro.pv || 0) + (bbd.pv || 0);
-    const muFlowOV = (bore.ov || 0) + (cwro.ov || 0) + (bbd.ov || 0);
-    const muSaving = muFlowPV - muFlowOV;
-
-    const updatedDateTime = makeDatetime(globalOffset + localIndex);
+    const muFlowPV = (bore.pv||0) + (cwro.pv||0) + (bbd.pv||0);
+    const muFlowOV = (bore.ov||0) + (cwro.ov||0) + (bbd.ov||0);
 
     return {
-      updatedDateTime,
+      updatedDateTime:      makeDatetime(globalOffset + i),
       currentOperatingCost: curr,
       newOperatingCost:     newC,
       fixedCost:            (curr - newC) / (365 * 48),
@@ -74,7 +70,7 @@ function parseSheet(wb, sheetName, globalOffset) {
       mu_flow:    muFlowPV,
       mu_flow_pv: muFlowPV,
       mu_flow_ov: muFlowOV,
-      mu_saving:  muSaving,
+      mu_saving:  muFlowPV - muFlowOV,
       supply_temp:         row['supply_temp']         ?? null,
       return_temp:         row['return_temp']         ?? null,
       ambient_temp:        row['ambient_temp']        ?? null,
@@ -97,71 +93,93 @@ function parseSheet(wb, sheetName, globalOffset) {
 }
 
 function findExcelFiles() {
-  const dir = __dirname;
-  const files = fs.readdirSync(dir)
+  return fs.readdirSync(__dirname)
     .filter(f => /\.(xlsx|xls)$/i.test(f))
     .sort((a, b) => {
       const numA = parseInt((a.match(/\d+/) || ['0'])[0], 10);
       const numB = parseInt((b.match(/\d+/) || ['0'])[0], 10);
       return numA - numB;
-    });
-  if (!files.length) throw new Error('No Excel file found');
-  console.log('📋 File order:', files);
-  return files.map(f => path.join(dir, f));
+    })
+    .map(f => path.join(__dirname, f));
 }
 
-let N1 = [], N2 = [], N3 = [], P2 = [], A2 = [];
+// ── Auto-convert Excel → JSON (only if JSON missing or Excel is newer) ─────
+function convertIfNeeded() {
+  const excelFiles = findExcelFiles();
+  if (!excelFiles.length) return false;
 
-function loadData() {
-  try {
-    const excelFiles = findExcelFiles();
-    console.log(`📊 Found ${excelFiles.length} Excel file(s)`);
-    N1 = []; N2 = []; N3 = []; P2 = []; A2 = [];
+  // Check if any JSON is missing
+  const anyMissing = LABELS.some(
+    label => !fs.existsSync(path.join(__dirname, `data_${label}.json`))
+  );
 
-    const offsets = { N1: 0, N2: 0, N3: 0, P2: 0, A2: 0 };
+  // Check if any Excel is newer than JSON
+  const excelMtime = Math.max(...excelFiles.map(f => fs.statSync(f).mtimeMs));
+  const jsonMtime  = LABELS.reduce((min, label) => {
+    const p = path.join(__dirname, `data_${label}.json`);
+    return fs.existsSync(p) ? Math.min(min, fs.statSync(p).mtimeMs) : 0;
+  }, Infinity);
 
-    for (const filePath of excelFiles) {
-      console.log(`📂 Loading: ${path.basename(filePath)}`);
-      const wb         = XLSX.readFile(filePath);
-      const sheetNames = wb.SheetNames;
-      console.log(`   Sheets: ${sheetNames.join(', ')}`);
-
-      const load = (label, arr) => {
-        sheetNames
-          .filter(s => s.toUpperCase() === label)
-          .forEach(s => {
-            const rows = parseSheet(wb, s, offsets[label]);
-            arr.push(...rows);
-            offsets[label] += rows.length;
-          });
-      };
-
-      load('N1', N1);
-      load('N2', N2);
-      load('N3', N3);
-      load('P2', P2);
-      load('A2', A2);
-    }
-
-    const showRange = (label, arr) => {
-      if (!arr.length) return;
-      console.log(`   ${label}: ${arr.length} rows | ${arr[0].updatedDateTime} → ${arr[arr.length - 1].updatedDateTime}`);
-    };
-
-    console.log(`\n✅ Loaded totals:`);
-    showRange('N1', N1);
-    showRange('N2', N2);
-    showRange('N3', N3);
-    showRange('P2', P2);
-    showRange('A2', A2);
-    console.log(`   Dashboard → Entry 1 / ${Math.max(N1.length, N2.length, N3.length, P2.length, A2.length)}`);
-
-  } catch (err) {
-    console.error('❌ Excel load error:', err.message);
+  if (!anyMissing && excelMtime <= jsonMtime) {
+    console.log('✅ JSON files are up to date — skipping conversion');
+    return true;
   }
+
+  console.log('\n🔄 Converting Excel → JSON (first time setup)...');
+  console.log(`   Found ${excelFiles.length} Excel file(s)`);
+
+  const sheets  = Object.fromEntries(LABELS.map(l => [l, []]));
+  const offsets = Object.fromEntries(LABELS.map(l => [l, 0]));
+
+  for (const filePath of excelFiles) {
+    console.log(`\n   📂 ${path.basename(filePath)}`);
+    const wb = XLSX.readFile(filePath);
+    for (const label of LABELS) {
+      wb.SheetNames
+        .filter(s => s.toUpperCase() === label)
+        .forEach(s => {
+          const rows = parseSheet(wb, s, offsets[label]);
+          sheets[label].push(...rows);
+          offsets[label] += rows.length;
+        });
+    }
+  }
+
+  for (const label of LABELS) {
+    const rows    = sheets[label];
+    const outFile = path.join(__dirname, `data_${label}.json`);
+    fs.writeFileSync(outFile, JSON.stringify(rows));
+    console.log(`   💾 data_${label}.json — ${rows.length} rows`);
+  }
+
+  console.log('\n✅ Conversion done!\n');
+  return true;
 }
 
-loadData();
+// ── Load data from JSON ────────────────────────────────────────────────────
+function loadAllJSON() {
+  const result = {};
+  for (const label of LABELS) {
+    const filePath = path.join(__dirname, `data_${label}.json`);
+    if (fs.existsSync(filePath)) {
+      result[label] = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      console.log(`   ✅ ${label}: ${result[label].length} rows`);
+    } else {
+      result[label] = [];
+      console.warn(`   ⚠️  ${label}: no data`);
+    }
+  }
+  return result;
+}
+
+// ── Startup ────────────────────────────────────────────────────────────────
+console.log('\n🚀 Starting Water Optimiser Backend...');
+convertIfNeeded();
+
+console.log('\n📦 Loading JSON into memory...');
+const { N1, N2, N3, P2, A2 } = loadAllJSON();
+const maxTotal = Math.max(N1.length, N2.length, N3.length, P2.length, A2.length);
+console.log(`\n✅ Ready — max ${maxTotal} entries\n`);
 
 // ── API Routes ─────────────────────────────────────────────────────────────
 app.get('/api/data', (req, res) => res.json({ N1, N2, N3, P2, A2 }));
@@ -184,29 +202,26 @@ app.get('/api/data/:nap/:index', (req, res) => {
   res.json({ nap, index: idx, total, entry: map[nap][idx] });
 });
 
-app.post('/api/reload', (req, res) => {
-  loadData();
-  res.json({ ok: true, N1: N1.length, N2: N2.length, N3: N3.length, P2: P2.length, A2: A2.length });
-});
-
 app.get('/api/files', (req, res) => {
-  try {
-    const files = findExcelFiles().map(f => path.basename(f));
-    res.json({ files, N1: N1.length, N2: N2.length, N3: N3.length, P2: P2.length, A2: A2.length });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const excelFiles = findExcelFiles().map(f => path.basename(f));
+  res.json({
+    excelFiles,
+    N1: N1.length, N2: N2.length, N3: N3.length, P2: P2.length, A2: A2.length
+  });
 });
 
-// ── Frontend serve (PWA build) ─────────────────────────────────────────────
+app.post('/api/reload', (req, res) => {
+  res.json({ message: 'Redeploy on Render to reload data.', ok: true });
+});
+
+// ── Frontend serve ─────────────────────────────────────────────────────────
 const distPath = path.join(__dirname, '../frontend/dist');
-app.use(express.static(distPath));
-app.get('*', (req, res) => {
-  res.sendFile(path.join(distPath, 'index.html'));
-});
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
+}
 
-// ── Start ──────────────────────────────────────────────────────────────────
+// ── Listen ─────────────────────────────────────────────────────────────────
 app.listen(process.env.PORT || 4000, () => {
-  console.log('\n✅ Backend ready → http://localhost:4000');
-  console.log('   Datetime: Row 0 = 01/01/2022 00:00 | +30 min per row\n');
+  console.log('🌐 Server on port', process.env.PORT || 4000);
 });
