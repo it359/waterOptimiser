@@ -4,7 +4,17 @@ const path    = require('path');
 const fs      = require('fs');
 
 const app = express();
-app.use(cors());
+
+// CORS fix
+app.use(cors({
+  origin: [
+    'https://wateroptimiser.netlify.app',
+    'http://localhost:5173',
+    'http://localhost:4000',
+  ],
+  methods: ['GET','POST'],
+}));
+
 app.use(express.json());
 
 const LABELS = ['N1', 'N2', 'N3', 'P2', 'A2'];
@@ -30,9 +40,6 @@ const missing = LABELS.filter(l => !fs.existsSync(path.join(__dirname, `data_${l
 if (missing.length) console.error(`❌ Missing: ${missing.join(', ')}`);
 else console.log('✅ All JSON files found — ready!\n');
 
-// ── Routes ─────────────────────────────────────────────────────────────────
-
-// Frontend expects { N1: [...], N2: [...], ... }
 app.get('/api/data', (req, res) => {
   const result = {};
   for (const label of LABELS) result[label] = getSheet(label);
@@ -67,7 +74,6 @@ app.post('/api/reload', (req, res) => {
   res.json({ ok: true, message: 'Cache cleared' });
 });
 
-// ── Frontend ───────────────────────────────────────────────────────────────
 const distPath = path.join(__dirname, '../frontend/dist');
 if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
