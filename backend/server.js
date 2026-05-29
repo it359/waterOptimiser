@@ -5,7 +5,6 @@ const fs      = require('fs');
 
 const app = express();
 
-// CORS fix
 app.use(cors({
   origin: [
     'https://wateroptimiser.netlify.app',
@@ -14,7 +13,6 @@ app.use(cors({
   ],
   methods: ['GET','POST'],
 }));
-
 app.use(express.json());
 
 const LABELS = ['N1', 'N2', 'N3', 'P2', 'A2'];
@@ -27,8 +25,9 @@ function getSheet(label) {
   console.log(`📂 Loading ${label}...`);
   cache[label] = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   console.log(`   ✅ ${label}: ${cache[label].length} rows`);
+  // Max 1 sheet in memory at a time
   const keys = Object.keys(cache);
-  if (keys.length > 2) {
+  if (keys.length > 1) {
     const evict = keys.find(k => k !== label);
     if (evict) { delete cache[evict]; console.log(`   🗑️  ${evict} evicted`); }
   }
@@ -40,12 +39,7 @@ const missing = LABELS.filter(l => !fs.existsSync(path.join(__dirname, `data_${l
 if (missing.length) console.error(`❌ Missing: ${missing.join(', ')}`);
 else console.log('✅ All JSON files found — ready!\n');
 
-app.get('/api/data', (req, res) => {
-  const result = {};
-  for (const label of LABELS) result[label] = getSheet(label);
-  res.json(result);
-});
-
+// Per-NAP routes only — no bulk /api/data to avoid OOM
 app.get('/api/data/:nap', (req, res) => {
   const nap = req.params.nap.toUpperCase();
   if (!LABELS.includes(nap)) return res.status(404).json({ error: 'NAP not found' });
@@ -65,8 +59,7 @@ app.get('/api/data/:nap/:index', (req, res) => {
 });
 
 app.get('/api/files', (req, res) => {
-  const counts = Object.fromEntries(LABELS.map(l => [l, cache[l]?.length || 0]));
-  res.json({ source: 'JSON', ...counts });
+  res.json({ source: 'JSON', labels: LABELS });
 });
 
 app.post('/api/reload', (req, res) => {
