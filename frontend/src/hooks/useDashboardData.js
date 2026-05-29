@@ -31,12 +31,29 @@ export function useDashboardData() {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   }, [dark]);
 
-  /* Fetch */
+  /* Fetch — each NAP separately to avoid timeout */
   const fetchData = useCallback(() => {
-    fetch(`${API}/api/data`)
-      .then(r=>r.json())
-      .then(d=>{ setAllData({N1:d.N1||[],N2:d.N2||[],N3:d.N3||[],P2:d.P2||[],A2:d.A2||[]}); setLoading(false); })
-      .catch(()=>{ setError("Backend not connecting — run: cd backend && node server.js"); setLoading(false); });
+    const naps = ['N1','N2','N3','P2','A2'];
+    setLoading(true);
+    setError(null);
+
+    Promise.all(
+      naps.map(nap =>
+        fetch(`${API}/api/data/${nap}`)
+          .then(r => r.json())
+          .then(d => ({ nap, data: d.data || [] }))
+      )
+    )
+    .then(results => {
+      const d = {};
+      results.forEach(({ nap, data }) => { d[nap] = data; });
+      setAllData(d);
+      setLoading(false);
+    })
+    .catch(() => {
+      setError("Backend not connecting — run: cd backend && node server.js");
+      setLoading(false);
+    });
   }, []);
 
   useEffect(()=>{ fetchData(); }, [fetchData]);
